@@ -6,12 +6,13 @@ import com.example.orderreconciliation.utils.ReadCsv;
 import com.opencsv.CSVWriter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 
 /**
@@ -30,7 +31,6 @@ public class OrderCsvService {
         this.csvFilePath = csvFilePath;
     }
 
-    @Transactional
     public List<Order> uploadCsv(MultipartFile file) {
         validateFile(file);
 
@@ -92,9 +92,11 @@ public class OrderCsvService {
             throw new InvalidCsvException("Unable to write CSV file: " + e.getMessage());
         }
 
-        if (!temp.renameTo(target)) {
+        try {
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
             temp.delete();
-            throw new InvalidCsvException("Unable to replace backend CSV file");
+            throw new InvalidCsvException("Unable to replace backend CSV file: " + e.getMessage());
         }
     }
 }
