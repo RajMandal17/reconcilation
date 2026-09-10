@@ -1,7 +1,7 @@
 package com.example.orderreconciliation.controller;
 
 import com.example.orderreconciliation.model.Order;
-import com.example.orderreconciliation.service.CsvService;
+import com.example.orderreconciliation.service.OrderCsvService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -17,31 +17,28 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * REST controller for CSV file upload operations.
- */
 @RestController
 @RequestMapping("/api/v1/orders")
 @Tag(name = "CSV Upload", description = "APIs for uploading order data via CSV")
 public class CsvController {
 
-    private final CsvService csvService;
+    private final OrderCsvService orderCsvService;
 
-    public CsvController(CsvService csvService) {
-        this.csvService = csvService;
+    public CsvController(OrderCsvService orderCsvService) {
+        this.orderCsvService = orderCsvService;
     }
 
     @PostMapping(value = "/csv", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(
             summary = "Upload a CSV file containing orders",
-            description = "Validates the CSV file, checks all rows, detects duplicates, and writes to the configured CSV location.",
+            description = "Validates the header, skips invalid data rows, keeps valid rows, and writes the valid rows to the backend CSV file.",
             responses = {
                     @ApiResponse(responseCode = "200", description = "CSV processed successfully"),
-                    @ApiResponse(responseCode = "400", description = "CSV validation error")
+                    @ApiResponse(responseCode = "400", description = "Invalid CSV header or file")
             }
     )
     public ResponseEntity<Map<String, Object>> uploadCsv(@RequestParam("file") MultipartFile file) {
-        List<Order> orders = csvService.processUploadedCsv(file);
+        List<Order> orders = orderCsvService.uploadCsv(file);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("message", "CSV processed successfully");

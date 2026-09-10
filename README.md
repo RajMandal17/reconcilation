@@ -1,113 +1,133 @@
 # Order Reconciliation System
 
-A Spring Boot application that reconciles order records between two data sources: a **Database** (Source A) and a **CSV file** (Source B).
+A Spring Boot application that reconciles order records between two independent data sources: a **Database** (Source A) and a **backend CSV file** (Source B).
 
-## Overview
+## New CSV Flow
 
-The system provides REST APIs to:
-1. Insert/update orders in the database
-2. Upload order data via CSV files
-3. Reconcile records between the two sources using an efficient HashMap-based algorithm
+The old `CsvService` / `CsvFileHandler` flow has been removed. CSV processing now follows one simple flow:
 
-## Architecture
-
+```text
+CSV upload
+   |
+   v
+CsvController
+   |
+   v
+OrderCsvService
+   |
+   v
+ReadCsv
+   |
+   +--> Validate header
+   |       |
+   |       +--> wrong header -> reject complete file
+   |
+   +--> Read data rows
+           |
+           +--> valid row   -> collect Order
+           |
+           +--> invalid row -> skip row and continue
+   |
+   v
+List<Order> containing only valid rows
+   |
+   v
+Write all valid rows to backend CSV once
+   |
+   v
+./data/orders.csv
 ```
-                    CLIENT
-                       |
-        +--------------+--------------+
-        |              |              |
-        v              v              v
-  OrderTable       CsvController   Reconciliation
-  Controller                       Controller
-        |              |              |
-        v              v              v
-  OrderTable        CsvService    Reconciliation
-    Service                          Service
-        |              |              |
-        v              v              |
- OrderRepository  CsvFileHandler      |
-        |              |              |
-        v              v              |
-   DATABASE          CSV FILE          |
-        |              |              |
-        +--------------+--------------+
-                       |
-                       v
-                 Order objects
-                       |
-                       v
-              HashMap<String,Order>
-                       |
-                       v
-                  HashSet<String>
-                       |
-                       v
-                 Compare fields
-                       |
-          +------------+------------+
-          |            |            |
-          v            v            v
-       MATCHED     TABLE NOT      CSV NOT
-                   MATCHED        MATCHED
+
+Header validation is file-level validation. A wrong header rejects the complete upload. Data-row validation is row-level validation: missing fields, wrong column count, invalid numbers, invalid timestamp, invalid order type, or other row errors cause only that row to be skipped.
+
+## Reconciliation Flow
+
+```text
+Database Source A                 CSV Source B
+      |                                  |
+      v                                  v
+OrderTableService                OrderCsvService
+      |                                  |
+      v                                  v
+HashMap<String, Order>           HashMap<String, Order>
+      |                                  |
+      +---------------+------------------+
+                      |
+                      v
+              HashSet<String>
+              union of orderIds
+                      |
+                      v
+              Compare all fields
+                      |
+          +-----------+-----------+
+          |           |           |
+          v           v           v
+       MATCHED    TABLE NOT    CSV NOT
+                  MATCHED      MATCHED
 ```
+
+The reconciliation uses `HashMap` for O(1) average lookup by `orderId` and one `HashSet` containing the union of IDs. There are no nested loops.
 
 ## Package Structure
 
-```
+```text
 com.example.orderreconciliation
 ├── controller
-│   ├── OrderTableController      # POST /api/v1/orders/table
-│   ├── CsvController             # POST /api/v1/orders/csv
-│   └── ReconciliationController  # GET /api/v1/reconciliation/*
+│   ├── OrderTableController
+│   ├── CsvController
+│   └── ReconciliationController
 │
 ├── service
-│   ├── OrderTableService         # Database order operations
-│   ├── CsvService                # CSV upload/validation
-│   └── ReconciliationService     # Core reconciliation logic
+│   ├── OrderTableService
+│   ├── OrderCsvService
+│   └── ReconciliationService
+│
+├── utils
+│   └── ReadCsv
 │
 ├── repository
-│   └── OrderRepository           # JPA repository
+│   └── OrderRepository
 │
 ├── entity
-│   └── OrderEntity               # JPA entity for orders table
+│   └── OrderEntity
 │
 ├── model
-│   └── Order                     # DTO + application model
+│   └── Order                  # DTO + application model
 │
 ├── dto
-│   └── ReconciliationResult      # Reconciliation output
+│   └── ReconciliationResult
 │
 ├── mapper
-│   └── OrderMapper               # Order <-> OrderEntity converter
-│
-├── csv
-│   └── CsvFileHandler            # CSV read/write/validate
+│   └── OrderMapper
 │
 ├── enums
-│   └── OrderType                 # BUY, SELL
+│   └── OrderType              # BUY, SELL
 │
 └── exception
-    ├── InvalidOrderException     # Order validation errors
-    ├── InvalidCsvException       # CSV validation errors
-    └── GlobalExceptionHandler    # Centralized error handling
+    ├── InvalidOrderException
+    ├── InvalidCsvException
+    └── GlobalExceptionHandler
 ```
 
-## Database Schema
+The legacy `csv/CsvFileHandler.java` and `service/CsvService.java` are intentionally removed.
 
-**Table: `orders`**
+## Data Model
 
-| Column          | Type          | Constraints              |
-|-----------------|---------------|--------------------------|
-| id              | BIGINT        | Primary Key, Auto-increment |
-| order_id        | VARCHAR(12)   | NOT NULL, UNIQUE         |
-| client_name     | VARCHAR       | NOT NULL                 |
-| stock_name      | VARCHAR       | NOT NULL                 |
-| order_qty       | DECIMAL(17,2) | NOT NULL                 |
-| price           | DECIMAL(16,1) | NOT NULL                 |
-| order_timestamp | TIMESTAMP     | NOT NULL                 |
-| order_type      | VARCHAR       | NOT NULL (BUY/SELL)      |
+### Database: `orders`
 
-## CSV Format
+| Column          | Type           | Constraints |
+|-----------------|----------------|-------------|
+| id              | BIGINT         | Primary Key, auto-increment |
+| order_id        | VARCHAR(12)    | NOT NULL, UNIQUE |
+| client_name     | VARCHAR        | NOT NULL |
+| stock_name      | VARCHAR        | NOT NULL |
+| order_qty       | DECIMAL(17,2)  | NOT NULL |
+| price           | DECIMAL(16,1)  | NOT NULL |
+| order_timestamp | TIMESTAMP      | NOT NULL |
+| order_type      | VARCHAR        | NOT NULL (BUY/SELL) |
+
+### CSV Format
 
 ```csv
 orderId,clientName,stockName,orderQty,price,orderTimestamp,orderType
@@ -115,160 +135,140 @@ orderId,clientName,stockName,orderQty,price,orderTimestamp,orderType
 100000000002,XYZ,INFY,200.50,1800.0,2026-09-08T10:05:00,SELL
 ```
 
-## API Documentation
+Validation rules:
+- `orderId`: exactly 12 digits
+- `clientName`: mandatory
+- `stockName`: mandatory
+- `orderQty`: positive number, maximum 2 decimal places
+- `price`: positive number, maximum 1 decimal place
+- `orderTimestamp`: valid `LocalDateTime`
+- `orderType`: `BUY` or `SELL`
+- row must contain exactly 7 columns
+- duplicate `orderId` rows are skipped after the first valid occurrence
 
-### 1. Insert/Update Order in Database
+## APIs
 
-```
+### 1. Insert/Update Database Order
+
+```text
 POST /api/v1/orders/table
 Content-Type: application/json
 ```
 
-**Request Body:**
-```json
-{
-  "orderId": "100000000001",
-  "clientName": "ABC",
-  "stockName": "TCS",
-  "orderQty": 100.25,
-  "price": 3500.0,
-  "orderTimestamp": "2026-09-08T10:00:00",
-  "orderType": "BUY"
-}
-```
+The existing `OrderTableService` inserts a new record or updates an existing record by `orderId`.
 
-**Response (200 OK):**
-```json
-{
-  "message": "Order saved successfully",
-  "order": {
-    "orderId": "100000000001",
-    "clientName": "ABC",
-    "stockName": "TCS",
-    "orderQty": 100.25,
-    "price": 3500.0,
-    "orderTimestamp": "2026-09-08T10:00:00",
-    "orderType": "BUY"
-  }
-}
-```
+### 2. Upload CSV
 
-### 2. Upload CSV File
-
-```
+```text
 POST /api/v1/orders/csv
 Content-Type: multipart/form-data
 ```
 
-**Response (200 OK):**
-```json
-{
-  "message": "CSV processed successfully",
-  "recordCount": 2,
-  "orders": [...]
-}
-```
+Processing order:
+1. Validate file presence and `.csv` extension.
+2. `ReadCsv` reads the header.
+3. Invalid header -> HTTP 400 and no backend CSV replacement.
+4. Read every data row.
+5. Invalid row -> skip and continue.
+6. Collect all valid `Order` objects.
+7. Write the collected valid records to the backend CSV in one write operation.
+8. Replace the previous backend CSV only after the new file has been written successfully.
+
+A successful response contains only the valid records that were accepted.
 
 ### 3. Get Matched Records
 
-```
+```text
 GET /api/v1/reconciliation/matched
 ```
 
-Returns records that exist in both DB and CSV with all fields matching.
+Returns records that exist in both sources and have all fields equal.
 
 ### 4. Get Table Not-Matched Records
 
-```
+```text
 GET /api/v1/reconciliation/table-not-matched
 ```
 
-Returns DB records that either don't exist in CSV or have different field values.
+Returns DB records that either do not exist in CSV or have different field values.
 
 ### 5. Get CSV Not-Matched Records
 
-```
+```text
 GET /api/v1/reconciliation/csv-not-matched
 ```
 
-Returns CSV records that either don't exist in DB or have different field values.
+Returns CSV records that either do not exist in DB or have different field values.
 
 ## Reconciliation Algorithm
 
-The reconciliation uses **HashMap** and **HashSet** for O(n) performance:
-
+```text
+1. Read DB orders.
+2. Read backend CSV orders.
+3. Build tableMap = HashMap<orderId, Order>.
+4. Build csvMap   = HashMap<orderId, Order>.
+5. Build allOrderIds = HashSet containing keys from both maps.
+6. Iterate once over allOrderIds.
+7. For each orderId:
+   - Both exist + all fields equal -> MATCHED
+   - Both exist + any field differs -> DB version to TABLE NOT MATCHED,
+                                      CSV version to CSV NOT MATCHED
+   - Only DB exists -> TABLE NOT MATCHED
+   - Only CSV exists -> CSV NOT MATCHED
 ```
-1. Read all DB orders → HashMap<orderId, Order> (tableMap)
-2. Read all CSV orders → HashMap<orderId, Order> (csvMap)
-3. Create HashSet<String> = union of all orderIds from both maps
-4. Single iteration over the union set:
-   - If orderId in BOTH maps:
-     - Compare ALL fields → MATCHED if equal, else both go to NOT-MATCHED
-   - If orderId only in tableMap → TABLE NOT MATCHED
-   - If orderId only in csvMap → CSV NOT MATCHED
-```
 
-### Why HashMap + HashSet?
-
-- **HashMap** provides O(1) average lookup by orderId
-- **HashSet** creates the union of all orderIds without duplicates
-- **Single pass** over the union set classifies all records
-- **Total complexity: O(n)** vs O(n²) with nested loops
-
-### BigDecimal Comparison
-
-Uses `compareTo() == 0` instead of `equals()` to handle scale differences:
-```java
-// 3500.0 and 3500 should be considered equal
-tableOrder.getPrice().compareTo(csvOrder.getPrice()) == 0
-```
+`BigDecimal.compareTo()` is used for `orderQty` and `price`, so values such as `3500.0` and `3500` are treated as numerically equal during reconciliation.
 
 ## Design Decisions
 
-1. **Single Order class** — Used as both DTO and application model to avoid unnecessary duplication. Only `OrderEntity` is separate for JPA persistence.
-
-2. **Temporary file strategy for CSV** — Writes to a temp file first, then atomically replaces the original to prevent data corruption on failure.
-
-3. **No nested loops** — Reconciliation uses HashMap/HashSet for O(n) performance instead of O(n²) nested comparisons.
-
-4. **Single reconciliation pass** — The `reconcile()` method runs once and returns all three result categories. Individual getter methods delegate to it.
-
-5. **Constructor injection** — All services use constructor injection with final fields for immutability and testability.
+1. **Order remains the common DTO/application model.** `OrderEntity` remains separate for JPA.
+2. **ReadCsv owns CSV parsing and row validation.** It returns only valid `Order` objects.
+3. **OrderCsvService owns upload orchestration and backend CSV persistence.**
+4. **Invalid header is a file-level failure; invalid data rows are row-level failures.**
+5. **The CSV source remains independent from the database source.** The CSV upload does not insert CSV records into the `orders` database table; otherwise reconciliation would compare the same source with itself.
+6. **HashMap + HashSet** are used for O(n) reconciliation.
+7. **Temporary-file replacement** prevents a partially written backend CSV from becoming the active source.
 
 ## How to Run
 
-### Prerequisites
+Prerequisites:
 - Java 17+
 - Maven 3.x
 
-### Start the Application
+Start:
 
 ```bash
 mvn spring-boot:run
 ```
 
-The application starts on `http://localhost:8080`.
+Application URL: `http://localhost:8080`
 
-### Access H2 Console
+Swagger UI: `http://localhost:8080/swagger-ui.html`
 
-Navigate to `http://localhost:8080/h2-console` with:
-- JDBC URL: `jdbc:h2:file:./data/orderdb`
-- Username: `sa`
-- Password: (empty)
+H2 Console: `http://localhost:8080/h2-console`
 
-### Access Swagger UI
+## Tests
 
-Navigate to `http://localhost:8080/swagger-ui.html`
-
-## How to Run Tests
+Run:
 
 ```bash
 mvn test
 ```
 
-## Sample curl Commands
+Tests cover:
+- valid CSV rows
+- invalid header rejection
+- invalid row skipping
+- duplicate row skipping
+- DB-only reconciliation
+- CSV-only reconciliation
+- matched records
+- field mismatch reconciliation
+- end-to-end CSV upload and reconciliation
 
-### Insert an order into the database
+## Sample curl
+
+### Database order
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/orders/table \
@@ -284,55 +284,31 @@ curl -X POST http://localhost:8080/api/v1/orders/table \
   }'
 ```
 
-### Upload a CSV file
+### CSV upload
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/orders/csv \
   -F "file=@data/orders.csv"
 ```
 
-### Get matched records
+### Reconciliation
 
 ```bash
 curl http://localhost:8080/api/v1/reconciliation/matched
-```
-
-### Get table not-matched records
-
-```bash
 curl http://localhost:8080/api/v1/reconciliation/table-not-matched
-```
-
-### Get CSV not-matched records
-
-```bash
 curl http://localhost:8080/api/v1/reconciliation/csv-not-matched
-```
-
-## Error Response Format
-
-All errors return a consistent JSON structure:
-
-```json
-{
-  "timestamp": "2026-09-09T10:00:00",
-  "status": 400,
-  "error": "VALIDATION_ERROR",
-  "message": "orderId must contain exactly 12 digits"
-}
 ```
 
 ## Technology Stack
 
-| Component         | Technology              |
-|-------------------|-------------------------|
-| Framework         | Spring Boot 3.2.5       |
-| Language          | Java 17+                |
-| Database          | H2 (file-based)         |
-| ORM               | Spring Data JPA         |
-| CSV Processing    | OpenCSV 5.9             |
-| Validation        | Jakarta Bean Validation |
-| API Documentation | SpringDoc OpenAPI 2.5   |
-| Testing           | JUnit 5 + Mockito       |
-| Build             | Maven                   |
-# reconcilation
+| Component | Technology |
+|---|---|
+| Framework | Spring Boot 3.2.5 |
+| Language | Java 17+ |
+| Database | H2 file-based |
+| ORM | Spring Data JPA |
+| CSV | OpenCSV 5.9 |
+| Validation | Jakarta Bean Validation + explicit CSV validation |
+| API Docs | SpringDoc OpenAPI 2.5 |
+| Testing | JUnit 5 + Mockito |
+| Build | Maven |
